@@ -26,7 +26,7 @@ import (
 // LdapGroupLinkParameters define the desired state of a Gitlab Group Ldap Link
 // https://docs.gitlab.com/api/group_ldap_links/
 type LdapGroupLinkParameters struct {
-	// GroupID is the ID of the group to create the deploy token in.
+	// GroupID is the ID of the group to create the LDAP group link in.
 	// +optional
 	// +immutable
 	GroupID *int64 `json:"groupId,omitempty"`
@@ -48,14 +48,23 @@ type LdapGroupLinkParameters struct {
 	// +immutable
 	LdapProvider string `json:"ldapProvider"`
 
-	// The CN of an LDAP group
+	// CN is the CN of an LDAP group. Provide either cn or filter, but not both.
+	// +optional
 	// +immutable
-	CN string `json:"cn"`
+	CN *string `json:"cn,omitempty"`
+
+	// Filter is the LDAP filter for the group. Provide either cn or filter, but not both.
+	// +optional
+	// +immutable
+	Filter *string `json:"filter,omitempty"`
 }
 
 // LdapGroupLinkObservation represents a Group Ldap Link.
 type LdapGroupLinkObservation struct {
+	// CN is the CN of the LDAP group (if cn-based link)
 	CN string `json:"cn,omitempty"`
+	// Filter is the LDAP filter (if filter-based link)
+	Filter string `json:"filter,omitempty"`
 }
 
 // A LdapGroupLinkSpec defines the desired state of a Gitlab Ldap group sync.
@@ -76,7 +85,7 @@ type LdapGroupLinkStatus struct {
 // +kubebuilder:printcolumn:name="READY",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].status"
 // +kubebuilder:printcolumn:name="SYNCED",type="string",JSONPath=".status.conditions[?(@.type=='Synced')].status"
 // +kubebuilder:printcolumn:name="AGE",type="date",JSONPath=".metadata.creationTimestamp"
-// +kubebuilder:printcolumn:name="EXTERNAL-NAME",type="string",JSONPath=".status.atProvider.name"
+// +kubebuilder:printcolumn:name="EXTERNAL-NAME",type="string",JSONPath=".metadata.annotations.crossplane\\.io/external-name"
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Cluster,categories={crossplane,managed,gitlab}
 type LdapGroupLink struct {

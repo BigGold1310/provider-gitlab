@@ -18,6 +18,7 @@ package ldapgrouplinks
 
 import (
 	"context"
+	"fmt"
 
 	xpv1 "github.com/crossplane/crossplane-runtime/v2/apis/common/v1"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/controller"
@@ -27,7 +28,6 @@ import (
 	"github.com/crossplane/crossplane-runtime/v2/pkg/reconciler/managed"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/resource"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/statemetrics"
-	"github.com/google/go-cmp/cmp"
 	"github.com/pkg/errors"
 	gitlab "gitlab.com/gitlab-org/api/client-go"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -39,13 +39,13 @@ import (
 )
 
 const (
-	errNotLdapGroupLink       = "managed resource is not a LdapGroupLink custom resource"
-	errGetFailed              = "cannot get Gitlab LdapGroupLink"
-	errCreateFailed           = "cannot create Gitlab LdapGroupLink"
-	errDeleteFailed           = "cannot delete Gitlab LdapGroupLink"
-	errLdapGroupLinktNotFound = "cannot find Gitlab LdapGroupLink"
-	errMissingGroupID         = "missing Spec.ForProvider.GroupID"
-	errMissingExternalName    = "external name annotation not found"
+	errNotLdapGroupLink    = "managed resource is not a LdapGroupLink custom resource"
+	errGetFailed           = "cannot get Gitlab LdapGroupLink"
+	errCreateFailed        = "cannot create Gitlab LdapGroupLink"
+	errDeleteFailed        = "cannot delete Gitlab LdapGroupLink"
+	errMissingGroupID      = "missing Spec.ForProvider.GroupID"
+	errMissingExternalName = "external name annotation not found"
+	errCNFilterXOR         = "exactly one of CN or Filter must be set"
 )
 
 // SetupLdapGroupLink adds a controller that reconciles ldapgrouplinks.
@@ -117,9 +117,9 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 		return managed.ExternalObservation{}, errors.New(errNotLdapGroupLink)
 	}
 
-	ldapCN := meta.GetExternalName(cr)
+	externalName := meta.GetExternalName(cr)
 
-	if ldapCN == "" {
+	if externalName == "" {
 		return managed.ExternalObservation{ResourceExists: false}, nil
 	}
 
@@ -127,22 +127,18 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 		return managed.ExternalObservation{}, errors.New(errMissingGroupID)
 	}
 
+	// Validate XOR: exactly one of CN or Filter must be set
+	if err := validateCNFilterXOR(&cr.Spec.ForProvider); err != nil {
+		return managed.ExternalObservation{}, err
+	}
+
 	groupLinks, _, err := e.client.ListGroupLDAPLinks(*cr.Spec.ForProvider.GroupID)
 	if err != nil {
 		return managed.ExternalObservation{}, errors.Wrap(resource.Ignore(groups.IsErrorLdapGroupLinkNotFound, err), errGetFailed)
 	}
 
-	found := false
-	groupLink := &gitlab.LDAPGroupLink{}
-	for _, gl := range groupLinks {
-		if gl.CN == ldapCN {
-			groupLink = gl
-			found = true
-			break
-		}
-	}
-
-	if !found {
+	groupLink := findMatchingLdapGroupLink(groupLinks, &cr.Spec.ForProvider)
+	if groupLink == nil {
 		return managed.ExternalObservation{ResourceExists: false}, nil
 	}
 
@@ -156,6 +152,41 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 	}, nil
 }
 
+// validateCNFilterXOR validates that exactly one of CN or Filter is set.
+func validateCNFilterXOR(p *v1alpha1.LdapGroupLinkParameters) error {
+	hasCN := p.CN != nil && *p.CN != ""
+	hasFilter := p.Filter != nil && *p.Filter != ""
+
+	if hasCN && hasFilter {
+		return errors.New(errCNFilterXOR)
+	}
+	if !hasCN && !hasFilter {
+		return errors.New(errCNFilterXOR)
+	}
+	return nil
+}
+
+// findMatchingLdapGroupLink finds a matching LDAP group link by provider AND (CN or Filter).
+func findMatchingLdapGroupLink(groupLinks []*gitlab.LDAPGroupLink, p *v1alpha1.LdapGroupLinkParameters) *gitlab.LDAPGroupLink {
+	for _, gl := range groupLinks {
+		if gl.Provider != p.LdapProvider {
+			continue
+		}
+		if p.Filter != nil && *p.Filter != "" {
+			// Filter-based matching
+			if gl.Filter == *p.Filter {
+				return gl
+			}
+		} else {
+			// CN-based matching
+			if p.CN != nil && gl.CN == *p.CN {
+				return gl
+			}
+		}
+	}
+	return nil
+}
+
 func (e *external) Create(ctx context.Context, mg resource.Managed) (managed.ExternalCreation, error) {
 	cr, ok := mg.(*v1alpha1.LdapGroupLink)
 	if !ok {
@@ -164,6 +195,11 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (managed.Ext
 
 	if cr.Spec.ForProvider.GroupID == nil {
 		return managed.ExternalCreation{}, errors.New(errMissingGroupID)
+	}
+
+	// Validate XOR: exactly one of CN or Filter must be set
+	if err := validateCNFilterXOR(&cr.Spec.ForProvider); err != nil {
+		return managed.ExternalCreation{}, err
 	}
 
 	ldapGroupLink, _, err := e.client.AddGroupLDAPLink(
@@ -175,13 +211,20 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (managed.Ext
 		return managed.ExternalCreation{}, errors.Wrap(err, errCreateFailed)
 	}
 
-	meta.SetExternalName(cr, ldapGroupLink.CN)
+	// Set external name: provider/cn or provider/filter:<filter>
+	// Filter-based links use "filter:" prefix to distinguish from CN
+	if ldapGroupLink.Filter != "" {
+		meta.SetExternalName(cr, fmt.Sprintf("%s/filter:%s", ldapGroupLink.Provider, ldapGroupLink.Filter))
+	} else {
+		meta.SetExternalName(cr, fmt.Sprintf("%s/%s", ldapGroupLink.Provider, ldapGroupLink.CN))
+	}
 
 	return managed.ExternalCreation{}, nil
 }
 
 func (e *external) Update(ctx context.Context, mg resource.Managed) (managed.ExternalUpdate, error) {
-	// recreate object
+	// GitLab API has no update endpoint for LDAP group links.
+	// To change group_access, we must delete and recreate the link.
 	_, errDelete := e.Delete(ctx, mg)
 	if errDelete != nil {
 		return managed.ExternalUpdate{}, errDelete
@@ -228,13 +271,16 @@ func (e *external) Disconnect(ctx context.Context) error {
 }
 
 func isLdapGroupLinkUpToDate(p *v1alpha1.LdapGroupLinkParameters, g *gitlab.LDAPGroupLink) bool {
-	if !cmp.Equal(p.CN, g.CN) {
-		return false
-	}
+	return stringPtrEquals(p.Filter, g.Filter) &&
+		stringPtrEquals(p.CN, g.CN) &&
+		p.LdapProvider == g.Provider &&
+		int(p.GroupAccess) == int(g.GroupAccess)
+}
 
-	if !cmp.Equal(int(p.GroupAccess), int(g.GroupAccess)) {
-		return false
+// stringPtrEquals compares a *string with a string, treating nil as empty string.
+func stringPtrEquals(ptr *string, val string) bool {
+	if ptr == nil {
+		return val == ""
 	}
-
-	return true
+	return *ptr == val
 }

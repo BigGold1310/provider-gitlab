@@ -46,8 +46,7 @@ func IsErrorLdapGroupLinkNotFound(err error) bool {
 	return strings.Contains(err.Error(), errorLdapGroupLinkNotFound)
 }
 
-// IsErrorLdapGroupLinkNotFound helper function to test for errLdapGroupLinkNotFound error.
-// NewLdapGroupLinkClient returns a new Giltab Group Service
+// NewLdapGroupLinkClient returns a new GitLab Group Service
 func NewLdapGroupLinkClient(cfg common.Config) LdapGroupLinkClient {
 	git := common.NewClient(cfg)
 	return git.Groups
@@ -56,9 +55,15 @@ func NewLdapGroupLinkClient(cfg common.Config) LdapGroupLinkClient {
 // GenerateAddLdapGroupLinkOptions is used to produce Options for LdapGroupLink creation
 func GenerateAddLdapGroupLinkOptions(p *v1alpha1.LdapGroupLinkParameters) *gitlab.AddGroupLDAPLinkOptions {
 	ldapGroupLink := &gitlab.AddGroupLDAPLinkOptions{
-		CN:          &p.CN,
 		GroupAccess: (*gitlab.AccessLevelValue)(&p.GroupAccess),
 		Provider:    &p.LdapProvider,
+	}
+
+	// Use either CN or Filter (mutually exclusive per GitLab API)
+	if p.Filter != nil && *p.Filter != "" {
+		ldapGroupLink.Filter = p.Filter
+	} else if p.CN != nil {
+		ldapGroupLink.CN = p.CN
 	}
 
 	return ldapGroupLink
@@ -71,17 +76,24 @@ func GenerateAddLdapGroupLinkObservation(ldapGroupLink *gitlab.LDAPGroupLink) v1
 	}
 
 	output := v1alpha1.LdapGroupLinkObservation{
-		CN: ldapGroupLink.CN,
+		CN:     ldapGroupLink.CN,
+		Filter: ldapGroupLink.Filter,
 	}
 
 	return output
 }
 
-// GenerateAddLdapGroupLinkOptions is used to produce Options for LdapGroupLink creation
+// GenerateDeleteGroupLDAPLinkWithCNOrFilterOptions is used to produce Options for LdapGroupLink deletion
 func GenerateDeleteGroupLDAPLinkWithCNOrFilterOptions(p *v1alpha1.LdapGroupLinkParameters) *gitlab.DeleteGroupLDAPLinkWithCNOrFilterOptions {
 	ldapGroupLink := &gitlab.DeleteGroupLDAPLinkWithCNOrFilterOptions{
-		CN:       &p.CN,
 		Provider: &p.LdapProvider,
+	}
+
+	// Use either CN or Filter (mutually exclusive per GitLab API)
+	if p.Filter != nil && *p.Filter != "" {
+		ldapGroupLink.Filter = p.Filter
+	} else if p.CN != nil {
+		ldapGroupLink.CN = p.CN
 	}
 
 	return ldapGroupLink
