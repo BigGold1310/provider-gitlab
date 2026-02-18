@@ -220,35 +220,34 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) (managed.Ext
 	}
 
 	if !e.cache.isPushRulesUpToDate {
-		// Only attempt to update push rules if the feature is supported
-		// (either we have cached rules or push rules are specified in spec)
-		if e.cache.externalPushRules != nil || cr.Spec.ForProvider.PushRules != nil {
-			if e.cache.externalPushRules != nil {
-				// Push rules exist in GitLab → Edit (PUT)
-				_, _, err := e.client.EditProjectPushRule(
-					meta.GetExternalName(cr),
-					projects.GenerateEditPushRulesOptions(&cr.Spec.ForProvider),
-					gitlab.WithContext(ctx),
-				)
-				if err != nil {
-					return managed.ExternalUpdate{}, errors.Wrap(err, errUpdatePushRulesFailed)
-				}
-			} else {
-				// Push rules don't exist yet in GitLab → Add (POST)
-				_, _, err := e.client.AddProjectPushRule(
-					meta.GetExternalName(cr),
-					projects.GenerateAddPushRulesOptions(&cr.Spec.ForProvider),
-					gitlab.WithContext(ctx),
-				)
-				if err != nil {
-					return managed.ExternalUpdate{}, errors.Wrap(err, errUpdatePushRulesFailed)
-				}
-			}
+		if err := e.updatePushRules(ctx, cr); err != nil {
+			return managed.ExternalUpdate{}, err
 		}
-		// If push rules are not supported (e.g., GitLab Community Edition) and
-		// none are specified in spec, we skip updating them
 	}
 	return managed.ExternalUpdate{}, nil
+}
+
+// updatePushRules reconciles push rules for a project. It decides whether to
+// add (POST) or edit (PUT) push rules based on whether they already exist in
+// GitLab (cached in e.cache.externalPushRules). If neither cached rules nor
+// spec push rules exist, the call is a no-op (e.g., GitLab Community Edition
+// where push rules are not supported and none are specified).
+func (e *external) updatePushRules(ctx context.Context, cr *v1alpha1.Project) error {
+	if e.cache.externalPushRules == nil && cr.Spec.ForProvider.PushRules == nil {
+		return nil
+	}
+
+	pid := meta.GetExternalName(cr)
+
+	// Push rules already exist in GitLab → Edit (PUT)
+	if e.cache.externalPushRules != nil {
+		_, _, err := e.client.EditProjectPushRule(pid, projects.GenerateEditPushRulesOptions(&cr.Spec.ForProvider), gitlab.WithContext(ctx))
+		return errors.Wrap(err, errUpdatePushRulesFailed)
+	}
+
+	// Push rules don't exist yet in GitLab → Add (POST)
+	_, _, err := e.client.AddProjectPushRule(pid, projects.GenerateAddPushRulesOptions(&cr.Spec.ForProvider), gitlab.WithContext(ctx))
+	return errors.Wrap(err, errUpdatePushRulesFailed)
 }
 
 func (e *external) Delete(ctx context.Context, mg resource.Managed) (managed.ExternalDelete, error) {
@@ -463,10 +462,11 @@ func (e *external) getProjectPushRules(ctx context.Context, cr *v1alpha1.Project
 		}
 		return nil, errors.Wrap(err, errGetPushRulesFailed)
 	}
-	// GitLab Premium/Enterprise may return 200 with null body when no push rules
-	// are configured for the project. In that case res is nil — treat it the same
-	// as "no push rules exist yet".
-	if res == nil {
+	// GitLab Premium/Enterprise may return 200 with null body when no project-level
+	// push rules are configured. The go-gitlab client allocates the response struct
+	// with new(ProjectPushRules) before decoding, so JSON null leaves a zero-valued
+	// struct (non-nil pointer, ID == 0) rather than nil. Detect both cases.
+	if res == nil || res.ID == 0 {
 		return nil, nil
 	}
 	e.cache.externalPushRules = &v1alpha1.PushRules{
